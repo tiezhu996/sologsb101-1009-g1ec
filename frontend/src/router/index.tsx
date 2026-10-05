@@ -13,6 +13,9 @@ const PatrolEntry = lazy(() => import('../pages/PatrolEntry'))
 const AbnormalBoard = lazy(() => import('../pages/AbnormalBoard'))
 const LeakBoard = lazy(() => import('../pages/LeakBoard'))
 const PlanList = lazy(() => import('../pages/PlanList'))
+const SegmentList = lazy(() => import('../pages/SegmentList'))
+const FlowPacketBoard = lazy(() => import('../pages/FlowPacketBoard'))
+const BalanceLedger = lazy(() => import('../pages/BalanceLedger'))
 
 export const ROUTES = {
   stations: '/stations',
@@ -20,7 +23,10 @@ export const ROUTES = {
   patrols: '/patrols',
   abnormal: '/abnormal',
   leaks: '/leaks',
-  plans: '/plans'
+  plans: '/plans',
+  segments: '/balance/segments',
+  flows: '/balance/flows',
+  ledger: '/balance/ledger'
 } as const
 
 function RouteFallback() {
@@ -43,6 +49,10 @@ export const appRoutes: RouteObject[] = [
       { path: 'abnormal', element: withSuspense(<AbnormalBoard />) },
       { path: 'leaks', element: withSuspense(<LeakBoard />) },
       { path: 'plans', element: withSuspense(<PlanList />) },
+      { path: 'balance', element: <Navigate to={ROUTES.segments} replace /> },
+      { path: 'balance/segments', element: withSuspense(<SegmentList />) },
+      { path: 'balance/flows', element: withSuspense(<FlowPacketBoard />) },
+      { path: 'balance/ledger', element: withSuspense(<BalanceLedger />) },
       { path: '*', element: <Navigate to={ROUTES.stations} replace /> }
     ]
   }

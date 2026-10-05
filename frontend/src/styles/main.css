@@ -254,3 +254,13 @@ body {
   align-items: center;
   gap: 8px;
 }
+
+/* 气量平衡台账：超阈行标红、已归档行置灰 */
+.balance-row--over > td {
+  background-color: #fdecea !important;
+}
+
+.balance-row--archived > td {
+  background-color: #f7f8fa !important;
+  color: #86909c;
+}

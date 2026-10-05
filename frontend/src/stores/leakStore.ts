@@ -5,6 +5,7 @@
 import { create } from 'zustand'
 import { liveQuery } from 'dexie'
 import { createId, db, type LeakRow } from '@/utils/db'
+import { recomputeBalance } from '@/utils/balanceEngine'
 import {
   LEAK_RETEST_PASS_PPM,
   retestPassed,
@@ -99,17 +100,21 @@ export const useLeakStore = create<LeakState_>((set, get) => ({
     if (params?.handler !== undefined) patch.handler = params.handler.trim()
     if (params?.measure !== undefined) patch.measure = params.measure.trim()
     await db.leaks.update(id, patch)
+    // 处置结论变化影响当日区段损耗核销（未复检不核销），重算该日起未归档核算
+    await recomputeBalance({ fromDate: leak.foundTime }).catch(() => undefined)
     return next
   },
 
   async submitRetest(id, retestValuePpm, handler) {
     const value = Number(retestValuePpm) || 0
+    const leak = get().leaks.find((item) => item.id === id)
     await db.leaks.update(id, {
       state: '已复检',
       retestValuePpm: value,
       handler: handler.trim() || '未署名',
       updatedAt: Date.now()
     })
+    if (leak) await recomputeBalance({ fromDate: leak.foundTime }).catch(() => undefined)
     return retestPassed(value)
   },
 

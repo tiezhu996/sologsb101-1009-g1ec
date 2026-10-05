@@ -7,6 +7,7 @@ import { ROUTES } from './router'
 import { useStationStore } from './stores/stationStore'
 import { usePatrolStore } from './stores/patrolStore'
 import { useLeakStore } from './stores/leakStore'
+import { useBalanceStore } from './stores/balanceStore'
 import { usePatrolGap } from './hooks/usePatrolGap'
 
 export default function App() {
@@ -15,6 +16,7 @@ export default function App() {
   const stationStore = useStationStore()
   const patrolStore = usePatrolStore()
   const leakStore = useLeakStore()
+  const balanceStore = useBalanceStore()
   const gap = usePatrolGap(patrolStore.patrols)
 
   const currentStation = stationStore.currentStation()
@@ -25,10 +27,13 @@ export default function App() {
     { path: ROUTES.patrols, label: '巡检录入', count: patrolStore.patrols.length },
     { path: ROUTES.abnormal, label: '异常分级', count: patrolStore.abnormalRows().length },
     { path: ROUTES.leaks, label: '泄漏处置', count: leakStore.counts()['待处置'] },
-    { path: ROUTES.plans, label: '巡检计划', count: gap.overdueCount }
+    { path: ROUTES.plans, label: '巡检计划', count: gap.overdueCount },
+    { path: '/balance', label: '气量平衡台', count: balanceStore.overThresholdCount() }
   ]
 
-  const activePath = navItems.find((item) => location.pathname.startsWith(item.path))?.path ?? ROUTES.stations
+  const activePath =
+    navItems.find((item) => (item.path === '/balance' ? location.pathname.startsWith('/balance') : location.pathname.startsWith(item.path)))
+      ?.path ?? ROUTES.stations
 
   return (
     <div className="app-shell">
@@ -95,7 +100,8 @@ export default function App() {
         <span>数据仅保存于本机浏览器（IndexedDB / localStorage），不上传任何服务器。</span>
         <span>
           调压站 {stationStore.stations.length} 座 · 设备 {stationStore.devices.length} 台 · 点位 {stationStore.points.length} 个 ·
-          巡检 {patrolStore.patrols.length} 次 · 读数 {patrolStore.readings.length} 条 · 超期未检 {gap.overdueCount} 次
+          巡检 {patrolStore.patrols.length} 次 · 读数 {patrolStore.readings.length} 条 · 超期未检 {gap.overdueCount} 次 ·
+          区段 {balanceStore.segments.length} 段 · 待补 {balanceStore.pendingCount()} 日 · 超阈 {balanceStore.overThresholdCount()} 日
         </span>
       </footer>
     </div>

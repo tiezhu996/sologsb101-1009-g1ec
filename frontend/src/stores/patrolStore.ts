@@ -5,6 +5,7 @@
 import { create } from 'zustand'
 import { liveQuery } from 'dexie'
 import { createId, db, deletePatrolCascade, putReading, type PatrolRow, type ReadingRow } from '@/utils/db'
+import { recomputeBalance } from '@/utils/balanceEngine'
 import type { Patrol, PatrolDraft, PatrolState } from '@/types/patrol'
 import type { Point } from '@/types/point'
 import type { Reading } from '@/types/reading'
@@ -128,10 +129,13 @@ export const usePatrolStore = create<PatrolState_>((set, get) => ({
   },
 
   async markMissed(id, note) {
+    const patrol = get().patrols.find((item) => item.id === id)
     await db.patrols.update(id, { state: '漏检', envNote: note.trim() || '超期未执行', updatedAt: Date.now() })
+    if (patrol) await recomputeBalance({ fromDate: patrol.planDate }).catch(() => undefined)
   },
 
   async completePatrol(id, patrolDate, patrolman, envNote) {
+    const patrol = get().patrols.find((item) => item.id === id)
     await db.patrols.update(id, {
       state: '已完成',
       patrolDate,
@@ -139,6 +143,8 @@ export const usePatrolStore = create<PatrolState_>((set, get) => ({
       envNote: envNote.trim(),
       updatedAt: Date.now()
     })
+    // 巡检现场结论回传后，补齐当日区段核算依据，重算该日起未归档核算
+    if (patrol) await recomputeBalance({ fromDate: patrolDate || patrol.planDate }).catch(() => undefined)
   },
 
   setReadingDraft(patrolId, pointId, value) {
