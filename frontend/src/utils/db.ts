@@ -10,10 +10,12 @@ import type { Point } from '@/types/point'
 import type { Patrol } from '@/types/patrol'
 import type { Reading } from '@/types/reading'
 import type { Leak } from '@/types/leak'
+import type { FlowBatch, FlowSnapshot, PipeSegment, SegmentBalance } from '@/types/balance'
 import { deviationPctOf, judgeReading } from '@/utils/range'
+import { freezeForConfirmation } from '@/utils/balanceEngine'
 
 export const DB_NAME = 'gbgaspress'
-export const DB_VERSION = 2
+export const DB_VERSION = 3
 
 export const LS_KEYS = {
   dbVersion: 'gbgaspress:db-version',
@@ -38,13 +40,17 @@ export interface BackupPayload {
   patrols: Patrol[]
   readings: Reading[]
   leaks: Leak[]
+  pipeSegments: PipeSegment[]
+  flowBatches: FlowBatch[]
+  flowSnapshots: FlowSnapshot[]
+  segmentBalances: SegmentBalance[]
 }
 
 export interface Revisioned {
   revision?: number
 }
 
-export const ROW_REVISION = 2
+export const ROW_REVISION = 3
 
 export type StationRow = Station & Revisioned
 export type DeviceRow = Device & Revisioned
@@ -52,6 +58,10 @@ export type PointRow = Point & Revisioned
 export type PatrolRow = Patrol & Revisioned
 export type ReadingRow = Reading & Revisioned
 export type LeakRow = Leak & Revisioned
+export type PipeSegmentRow = PipeSegment & Revisioned
+export type FlowBatchRow = FlowBatch & Revisioned
+export type FlowSnapshotRow = FlowSnapshot & Revisioned
+export type SegmentBalanceRow = SegmentBalance & Revisioned
 
 class GasPressDatabase extends Dexie {
   stations!: Table<StationRow, string>
@@ -60,6 +70,10 @@ class GasPressDatabase extends Dexie {
   patrols!: Table<PatrolRow, string>
   readings!: Table<ReadingRow, string>
   leaks!: Table<LeakRow, string>
+  pipeSegments!: Table<PipeSegmentRow, string>
+  flowBatches!: Table<FlowBatchRow, string>
+  flowSnapshots!: Table<FlowSnapshotRow, string>
+  segmentBalances!: Table<SegmentBalanceRow, string>
 
   constructor() {
     super(DB_NAME)
@@ -147,6 +161,31 @@ class GasPressDatabase extends Dexie {
             }
           })
       })
+
+    // v3：气量平衡台 —— 站间有向区段、流量包批次/快照、区段日核算结果
+    this.version(DB_VERSION)
+      .stores({
+        stations: 'id, name, grade, updatedAt',
+        devices: 'id, stationId, type, state, updatedAt',
+        points: 'id, deviceId, stationId, name, isCritical, updatedAt',
+        patrols: 'id, stationId, planDate, state, updatedAt',
+        readings: 'id, patrolId, pointId, isAbnormal, updatedAt',
+        leaks: 'id, deviceId, stationId, state, handler, updatedAt',
+        pipeSegments: 'id, upstreamStationId, downstreamStationId, updatedAt',
+        flowBatches: 'id, batchNo, bizDate, state, importedAt, updatedAt',
+        flowSnapshots: 'id, batchId, stationId',
+        segmentBalances: 'id, segmentId, bizDate, batchId, status, archived, overThreshold, updatedAt'
+      })
+      .upgrade(async (tx) => {
+        for (const name of ['pipeSegments', 'flowBatches', 'flowSnapshots', 'segmentBalances']) {
+          await tx
+            .table(name)
+            .toCollection()
+            .modify((row: Record<string, unknown>) => {
+              row.revision = ROW_REVISION
+            })
+        }
+      })
   }
 }
 
@@ -219,9 +258,88 @@ const SEED_LEAKS: LeakRow[] = [
   { id: 'lk-3', deviceId: 'dv-4', stationId: 'st-2', concentrationPpm: 88, foundTime: '2024-06-08', measure: '', state: '待处置', retestValuePpm: 0, handler: '', createdAt: stamp(-12), updatedAt: stamp(-12), revision: ROW_REVISION }
 ]
 
+/* ======================== 气量平衡演示数据（v3） ======================== */
+
+const SEED_SEGMENT: PipeSegmentRow = {
+  id: 'sg-1',
+  name: '城东—西城连通段',
+  upstreamStationId: 'st-1',
+  downstreamStationId: 'st-2',
+  lossRateThresholdPct: 3,
+  remark: '高中压出站至西城新区方向，历史日均损耗约 1%~2%',
+  createdAt: stamp(-200),
+  updatedAt: stamp(-200),
+  revision: ROW_REVISION
+}
+
+/** 批次种子：[批次号, 业务日期, 状态, 抄回人, 说明, 上游出口, 下游进口] */
+const SEED_BATCH_ROWS: Array<[string, string, FlowBatch['state'], string, string, number | null, number | null]> = [
+  ['FB20240603', '2024-06-03', '已确认', '王强', 'SCADA 流量日报，计量班复核', 7650, 7576],
+  ['FB20240605', '2024-06-05', '已确认', '王强', '城东阀体漏点当日，处置单复检合格闭环', 7600, 7340],
+  ['FB20240612', '2024-06-12', '待确认', '王强', '法兰漏点处置单尚未复检，损耗口径待现场结论', 7400, 7150],
+  ['FB20240619', '2024-06-19', '待确认', '刘洋', '城东出口表计远传缺失，现场表待抄', null, 6900]
+]
+
+function buildSeedFlowData(): {
+  batches: FlowBatchRow[]
+  snapshots: FlowSnapshotRow[]
+} {
+  const batches: FlowBatchRow[] = []
+  const snapshots: FlowSnapshotRow[] = []
+  SEED_BATCH_ROWS.forEach(([batchNo, bizDate, state, collector, detail, st1Outlet, st2Inlet], index) => {
+    const batchTs = stamp(-17 + index)
+    const batch: FlowBatchRow = {
+      id: `fb-${index + 1}`,
+      batchNo,
+      bizDate,
+      collector,
+      source: 'SCADA 流量日报',
+      state,
+      importedAt: batchTs,
+      confirmedAt: state === '已确认' ? batchTs + 3600000 : null,
+      confirmedBy: state === '已确认' ? '调度值班长' : '',
+      snapshotCount: 2,
+      auditTrail: [
+        { at: batchTs, action: '导入', operator: collector, detail },
+        ...(state === '已确认'
+          ? [{ at: batchTs + 3600000, action: '确认' as const, operator: '调度值班长', detail: '当日损耗核算无误，归档台账' }]
+          : [])
+      ],
+      createdAt: batchTs,
+      updatedAt: batchTs,
+      revision: ROW_REVISION
+    }
+    batches.push(batch)
+    snapshots.push(
+      {
+        id: `fs-${index + 1}a`,
+        batchId: batch.id,
+        stationId: 'st-1',
+        inletFlowM3h: 7700,
+        outletFlowM3h: st1Outlet,
+        note: st1Outlet === null ? '出口表计未抄回' : '',
+        createdAt: batchTs,
+        updatedAt: batchTs,
+        revision: ROW_REVISION
+      },
+      {
+        id: `fs-${index + 1}b`,
+        batchId: batch.id,
+        stationId: 'st-2',
+        inletFlowM3h: st2Inlet,
+        outletFlowM3h: st2Inlet === null ? null : Math.round(st2Inlet * 0.96),
+        note: st2Inlet === null ? '进口远传缺失，待现场抄表' : '',
+        createdAt: batchTs,
+        updatedAt: batchTs,
+        revision: ROW_REVISION
+      }
+    )
+  })
+  return { batches, snapshots }
+}
+
 /** 由原始行派生偏差率与异常标记 */
-function buildSeedReadings(): ReadingRow[] {
-  return SEED_READING_ROWS.map(([patrolId, pointId, value, note], index) => {
+function buildSeedReadings(): ReadingRow[] {  return SEED_READING_ROWS.map(([patrolId, pointId, value, note], index) => {
     const point = SEED_POINTS.find((item) => item.id === pointId)
     const judgement = point
       ? judgeReading(value, point.standardMin, point.standardMax, point.isCritical)
@@ -242,9 +360,21 @@ function buildSeedReadings(): ReadingRow[] {
 }
 
 export async function seedDatabase(): Promise<void> {
+  const { batches, snapshots } = buildSeedFlowData()
   await db.transaction(
       'rw',
-      [db.stations, db.devices, db.points, db.patrols, db.readings, db.leaks],
+      [
+        db.stations,
+        db.devices,
+        db.points,
+        db.patrols,
+        db.readings,
+        db.leaks,
+        db.pipeSegments,
+        db.flowBatches,
+        db.flowSnapshots,
+        db.segmentBalances
+      ],
       async () => {
     await db.stations.bulkPut(SEED_STATIONS)
     await db.devices.bulkPut(SEED_DEVICES)
@@ -252,6 +382,38 @@ export async function seedDatabase(): Promise<void> {
     await db.patrols.bulkPut(SEED_PATROLS)
     await db.readings.bulkPut(buildSeedReadings())
     await db.leaks.bulkPut(SEED_LEAKS)
+    await db.pipeSegments.put(SEED_SEGMENT)
+    await db.flowBatches.bulkPut(batches)
+    await db.flowSnapshots.bulkPut(snapshots)
+
+    // 已确认批次在播种时即生成冻结核算快照，作为「上一有效批次」沿用来源
+    const patrolInputs = SEED_PATROLS.map((patrol) => ({
+      id: patrol.id,
+      stationId: patrol.stationId,
+      planDate: patrol.planDate,
+      patrolDate: patrol.patrolDate,
+      patrolman: patrol.patrolman,
+      envNote: patrol.envNote,
+      state: patrol.state,
+      readings: buildSeedReadings().filter((reading) => reading.patrolId === patrol.id)
+    }))
+    const seedBalances: SegmentBalanceRow[] = []
+    batches
+      .filter((batch) => batch.state === '已确认')
+      .forEach((batch) => {
+        const rows = freezeForConfirmation(
+          batch,
+          [SEED_SEGMENT],
+          snapshots,
+          patrolInputs,
+          SEED_LEAKS,
+          SEED_STATIONS,
+          seedBalances,
+          batch.confirmedAt ?? batch.createdAt
+        )
+        rows.forEach((row) => seedBalances.push({ ...row, revision: ROW_REVISION }))
+      })
+    await db.segmentBalances.bulkPut(seedBalances)
   })
 }
 
@@ -268,12 +430,59 @@ export async function initDatabase(): Promise<void> {
 export async function deleteStationCascade(stationId: string): Promise<void> {
   await db.transaction(
       'rw',
-      [db.stations, db.devices, db.points, db.patrols, db.readings, db.leaks],
+      [
+        db.stations,
+        db.devices,
+        db.points,
+        db.patrols,
+        db.readings,
+        db.leaks,
+        db.pipeSegments,
+        db.flowBatches,
+        db.flowSnapshots,
+        db.segmentBalances
+      ],
       async () => {
     const devices = await db.devices.where('stationId').equals(stationId).toArray()
     await deleteDevicesInternal(devices.map((device) => device.id))
     if (devices.length > 0) await db.devices.bulkDelete(devices.map((device) => device.id))
     await db.patrols.where('stationId').equals(stationId).delete()
+
+    // 拓扑：删除与该站相连的区段及其未归档核算结果（归档台账保留快照）
+    const linkedSegments = await db.pipeSegments
+      .filter((segment) => segment.upstreamStationId === stationId || segment.downstreamStationId === stationId)
+      .toArray()
+    if (linkedSegments.length > 0) {
+      const segmentIds = [...new Set(linkedSegments.map((segment) => segment.id))]
+      await db.pipeSegments.bulkDelete(segmentIds)
+      await db.segmentBalances
+        .where('segmentId')
+        .anyOf(segmentIds)
+        .filter((row) => !row.archived)
+        .delete()
+    }
+
+    // 快照：清理该站快照；变空的流量包批次一并删除（未归档核算结果随后清）
+    const stationSnapshots = await db.flowSnapshots.where('stationId').equals(stationId).toArray()
+    if (stationSnapshots.length > 0) {
+      const batchIds = [...new Set(stationSnapshots.map((snapshot) => snapshot.batchId))]
+      await db.flowSnapshots.bulkDelete(stationSnapshots.map((snapshot) => snapshot.id))
+      const emptyBatches: string[] = []
+      await Promise.all(
+        batchIds.map(async (batchId) => {
+          if ((await db.flowSnapshots.where('batchId').equals(batchId).count()) === 0) emptyBatches.push(batchId)
+        })
+      )
+      if (emptyBatches.length > 0) {
+        await db.segmentBalances
+          .where('batchId')
+          .anyOf(emptyBatches)
+          .filter((row) => !row.archived)
+          .delete()
+        await db.flowBatches.bulkDelete(emptyBatches)
+      }
+    }
+
     await db.stations.delete(stationId)
   })
 }
@@ -281,7 +490,18 @@ export async function deleteStationCascade(stationId: string): Promise<void> {
 export async function deleteDeviceCascade(deviceId: string): Promise<void> {
   await db.transaction(
       'rw',
-      [db.stations, db.devices, db.points, db.patrols, db.readings, db.leaks],
+      [
+        db.stations,
+        db.devices,
+        db.points,
+        db.patrols,
+        db.readings,
+        db.leaks,
+        db.pipeSegments,
+        db.flowBatches,
+        db.flowSnapshots,
+        db.segmentBalances
+      ],
       async () => {
     await deleteDevicesInternal([deviceId])
     await db.devices.delete(deviceId)
@@ -291,7 +511,18 @@ export async function deleteDeviceCascade(deviceId: string): Promise<void> {
 export async function deletePointCascade(pointId: string): Promise<void> {
   await db.transaction(
       'rw',
-      [db.stations, db.devices, db.points, db.patrols, db.readings, db.leaks],
+      [
+        db.stations,
+        db.devices,
+        db.points,
+        db.patrols,
+        db.readings,
+        db.leaks,
+        db.pipeSegments,
+        db.flowBatches,
+        db.flowSnapshots,
+        db.segmentBalances
+      ],
       async () => {
     await db.readings.where('pointId').equals(pointId).delete()
     await db.points.delete(pointId)
@@ -301,10 +532,42 @@ export async function deletePointCascade(pointId: string): Promise<void> {
 export async function deletePatrolCascade(patrolId: string): Promise<void> {
   await db.transaction(
       'rw',
-      [db.stations, db.devices, db.points, db.patrols, db.readings, db.leaks],
+      [
+        db.stations,
+        db.devices,
+        db.points,
+        db.patrols,
+        db.readings,
+        db.leaks,
+        db.pipeSegments,
+        db.flowBatches,
+        db.flowSnapshots,
+        db.segmentBalances
+      ],
       async () => {
     await db.readings.where('patrolId').equals(patrolId).delete()
     await db.patrols.delete(patrolId)
+  })
+}
+
+/** 删除区段：连该区段的未归档核算结果一并清除（归档台账保留快照） */
+export async function deleteSegmentCascade(segmentId: string): Promise<void> {
+  await db.transaction('rw', [db.pipeSegments, db.segmentBalances], async () => {
+    await db.segmentBalances.where('segmentId').equals(segmentId).filter((row) => !row.archived).delete()
+    await db.pipeSegments.delete(segmentId)
+  })
+}
+
+/** 删除流量包：批次、快照与其未归档核算结果同事务清除（归档台账保留快照） */
+export async function deleteFlowBatchCascade(batchId: string): Promise<void> {
+  await db.transaction('rw', [db.flowBatches, db.flowSnapshots, db.segmentBalances], async () => {
+    await db.flowSnapshots.where('batchId').equals(batchId).delete()
+    await db.segmentBalances
+      .where('batchId')
+      .equals(batchId)
+      .filter((row) => !row.archived)
+      .delete()
+    await db.flowBatches.delete(batchId)
   })
 }
 
@@ -362,26 +625,36 @@ export async function recalculateReadingsOfPoint(pointId: string): Promise<void>
 /* ============================ 整库导入导出 ============================ */
 
 export async function countAll(): Promise<Record<string, number>> {
-  const [stations, devices, points, patrols, readings, leaks] = await Promise.all([
-    db.stations.count(),
-    db.devices.count(),
-    db.points.count(),
-    db.patrols.count(),
-    db.readings.count(),
-    db.leaks.count()
-  ])
-  return { stations, devices, points, patrols, readings, leaks }
+  const [stations, devices, points, patrols, readings, leaks, pipeSegments, flowBatches, flowSnapshots, segmentBalances] =
+    await Promise.all([
+      db.stations.count(),
+      db.devices.count(),
+      db.points.count(),
+      db.patrols.count(),
+      db.readings.count(),
+      db.leaks.count(),
+      db.pipeSegments.count(),
+      db.flowBatches.count(),
+      db.flowSnapshots.count(),
+      db.segmentBalances.count()
+    ])
+  return { stations, devices, points, patrols, readings, leaks, pipeSegments, flowBatches, flowSnapshots, segmentBalances }
 }
 
 export async function exportSnapshot(): Promise<BackupPayload> {
-  const [stations, devices, points, patrols, readings, leaks] = await Promise.all([
-    db.stations.toArray(),
-    db.devices.toArray(),
-    db.points.toArray(),
-    db.patrols.toArray(),
-    db.readings.toArray(),
-    db.leaks.toArray()
-  ])
+  const [stations, devices, points, patrols, readings, leaks, pipeSegments, flowBatches, flowSnapshots, segmentBalances] =
+    await Promise.all([
+      db.stations.toArray(),
+      db.devices.toArray(),
+      db.points.toArray(),
+      db.patrols.toArray(),
+      db.readings.toArray(),
+      db.leaks.toArray(),
+      db.pipeSegments.toArray(),
+      db.flowBatches.toArray(),
+      db.flowSnapshots.toArray(),
+      db.segmentBalances.toArray()
+    ])
   const strip = <T extends Revisioned>(row: T): Omit<T, 'revision'> => {
     const { revision: _revision, ...rest } = row
     return rest
@@ -395,14 +668,29 @@ export async function exportSnapshot(): Promise<BackupPayload> {
     points: points.map(strip),
     patrols: patrols.map(strip),
     readings: readings.map(strip),
-    leaks: leaks.map(strip)
+    leaks: leaks.map(strip),
+    pipeSegments: pipeSegments.map(strip),
+    flowBatches: flowBatches.map(strip),
+    flowSnapshots: flowSnapshots.map(strip),
+    segmentBalances: segmentBalances.map(strip)
   }
 }
 
 export async function importSnapshot(payload: BackupPayload): Promise<void> {
   await db.transaction(
       'rw',
-      [db.stations, db.devices, db.points, db.patrols, db.readings, db.leaks],
+      [
+        db.stations,
+        db.devices,
+        db.points,
+        db.patrols,
+        db.readings,
+        db.leaks,
+        db.pipeSegments,
+        db.flowBatches,
+        db.flowSnapshots,
+        db.segmentBalances
+      ],
       async () => {
     await Promise.all([
       db.stations.clear(),
@@ -410,7 +698,11 @@ export async function importSnapshot(payload: BackupPayload): Promise<void> {
       db.points.clear(),
       db.patrols.clear(),
       db.readings.clear(),
-      db.leaks.clear()
+      db.leaks.clear(),
+      db.pipeSegments.clear(),
+      db.flowBatches.clear(),
+      db.flowSnapshots.clear(),
+      db.segmentBalances.clear()
     ])
     const rev = <T>(row: T): T & Revisioned => ({ ...row, revision: ROW_REVISION })
     await db.stations.bulkPut((payload.stations ?? []).map(rev))
@@ -419,13 +711,28 @@ export async function importSnapshot(payload: BackupPayload): Promise<void> {
     await db.patrols.bulkPut((payload.patrols ?? []).map(rev))
     await db.readings.bulkPut((payload.readings ?? []).map(rev))
     await db.leaks.bulkPut((payload.leaks ?? []).map(rev))
+    await db.pipeSegments.bulkPut((payload.pipeSegments ?? []).map(rev))
+    await db.flowBatches.bulkPut((payload.flowBatches ?? []).map(rev))
+    await db.flowSnapshots.bulkPut((payload.flowSnapshots ?? []).map(rev))
+    await db.segmentBalances.bulkPut((payload.segmentBalances ?? []).map(rev))
   })
 }
 
 export async function clearAllTables(): Promise<void> {
   await db.transaction(
       'rw',
-      [db.stations, db.devices, db.points, db.patrols, db.readings, db.leaks],
+      [
+        db.stations,
+        db.devices,
+        db.points,
+        db.patrols,
+        db.readings,
+        db.leaks,
+        db.pipeSegments,
+        db.flowBatches,
+        db.flowSnapshots,
+        db.segmentBalances
+      ],
       async () => {
     await Promise.all([
       db.stations.clear(),
@@ -433,7 +740,11 @@ export async function clearAllTables(): Promise<void> {
       db.points.clear(),
       db.patrols.clear(),
       db.readings.clear(),
-      db.leaks.clear()
+      db.leaks.clear(),
+      db.pipeSegments.clear(),
+      db.flowBatches.clear(),
+      db.flowSnapshots.clear(),
+      db.segmentBalances.clear()
     ])
   })
 }

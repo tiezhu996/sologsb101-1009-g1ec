@@ -7,6 +7,7 @@ import { ROUTES } from './router'
 import { useStationStore } from './stores/stationStore'
 import { usePatrolStore } from './stores/patrolStore'
 import { useLeakStore } from './stores/leakStore'
+import { useBalanceStore } from './stores/balanceStore'
 import { usePatrolGap } from './hooks/usePatrolGap'
 
 export default function App() {
@@ -15,9 +16,11 @@ export default function App() {
   const stationStore = useStationStore()
   const patrolStore = usePatrolStore()
   const leakStore = useLeakStore()
+  const balanceStore = useBalanceStore()
   const gap = usePatrolGap(patrolStore.patrols)
 
   const currentStation = stationStore.currentStation()
+  const balanceStats = balanceStore.stats()
 
   const navItems = [
     { path: ROUTES.stations, label: '调压站台账', count: stationStore.stations.length },
@@ -25,6 +28,7 @@ export default function App() {
     { path: ROUTES.patrols, label: '巡检录入', count: patrolStore.patrols.length },
     { path: ROUTES.abnormal, label: '异常分级', count: patrolStore.abnormalRows().length },
     { path: ROUTES.leaks, label: '泄漏处置', count: leakStore.counts()['待处置'] },
+    { path: ROUTES.balance, label: '气量平衡', count: balanceStats.pendingRowCount },
     { path: ROUTES.plans, label: '巡检计划', count: gap.overdueCount }
   ]
 
@@ -37,7 +41,7 @@ export default function App() {
           <span className="app-header__mark">燃</span>
           <div>
             <h1 className="app-header__title">燃气调压站巡检与泄漏处置台</h1>
-            <p className="app-header__sub">调压站 · 设备 · 点位标准值 · 巡检读数 · 异常分级 · 泄漏闭环</p>
+            <p className="app-header__sub">调压站 · 设备 · 点位标准值 · 巡检读数 · 异常分级 · 泄漏闭环 · 气量平衡</p>
           </div>
         </div>
         <nav className="app-nav">
@@ -95,7 +99,8 @@ export default function App() {
         <span>数据仅保存于本机浏览器（IndexedDB / localStorage），不上传任何服务器。</span>
         <span>
           调压站 {stationStore.stations.length} 座 · 设备 {stationStore.devices.length} 台 · 点位 {stationStore.points.length} 个 ·
-          巡检 {patrolStore.patrols.length} 次 · 读数 {patrolStore.readings.length} 条 · 超期未检 {gap.overdueCount} 次
+          巡检 {patrolStore.patrols.length} 次 · 读数 {patrolStore.readings.length} 条 · 超期未检 {gap.overdueCount} 次 ·
+          区段 {balanceStats.segmentCount} 段 · 流量包 {balanceStore.batches.length} 包 · 待补依据 {balanceStats.pendingRowCount} 项
         </span>
       </footer>
     </div>

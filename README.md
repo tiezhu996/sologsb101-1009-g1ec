@@ -1,6 +1,6 @@
-# 燃气调压站巡检与泄漏处置台（sologsb101-1009）
+# 燃气调压站巡检、泄漏处置与气量平衡台（sologsb101-1009）
 
-面向燃气公司管网运行与调压站巡检人员，按调压站设备点位配置标准值，逐次录入进出口压力、温度与泄漏浓度并判定异常，对超标点派发泄漏处置单并复检闭环。核心动作：建站与设备、配巡检点位标准值、录巡检读数、判异常分级、派处置单复检、跟踪漏检。
+面向燃气公司管网运行与调压站巡检人员，按调压站设备点位配置标准值，逐次录入进出口压力、温度与泄漏浓度并判定异常，对超标点派发泄漏处置单并复检闭环；同时维护站点上下游区段拓扑、导入进出口流量快照，结合当天巡检与泄漏处置结论核算区段气量损耗。核心动作：建站与设备、配巡检点位标准值、录巡检读数、判异常分级、派处置单复检、跟踪漏检、维护区段方向、导流量包、核算区段损耗并归档批次台账。
 
 > 纯前端单页应用（SPA）：**无后端 / 无数据库服务 / 无 API**，全部数据保存在浏览器本地 IndexedDB。
 
@@ -32,7 +32,7 @@ docker compose up -d --build      # 改代码后重新构建启动
 | 框架 | React 18.3 | 函数组件 + Hooks |
 | 语言 | TypeScript 5.7 | `strict` 严格模式，构建前执行 `tsc --noEmit` |
 | UI 组件 | Arco Design 2.66 | 表格、表单、Modal、Tag、Badge、Progress |
-| 状态管理 | Zustand 4.5 | `stationStore` / `patrolStore` / `leakStore`（模块级 liveQuery 订阅回流） |
+| 状态管理 | Zustand 4.5 | `stationStore` / `patrolStore` / `leakStore` / `balanceStore`（模块级 liveQuery 订阅回流） |
 | 路由 | React Router 6.28 | `createBrowserRouter`，nginx `try_files` 回退 |
 | 本地持久化 | Dexie 4（IndexedDB） | 版本号 + `upgrade` 迁移 + 幂等播种 |
 | 构建 | Vite 6 | 输出 `dist/`，按路由自动分包 |
@@ -53,13 +53,14 @@ sologsb101-1009/
     ├── package.json / tsconfig.json / vite.config.ts / index.html
     ├── public/favicon.svg
     └── src/
-        ├── types/              # station.ts device.ts point.ts patrol.ts reading.ts leak.ts
-        ├── stores/             # stationStore.ts patrolStore.ts leakStore.ts
+        ├── types/              # station.ts device.ts point.ts patrol.ts reading.ts leak.ts balance.ts
+        ├── stores/             # stationStore.ts patrolStore.ts leakStore.ts balanceStore.ts
         ├── components/common/  # AbnormalTag.tsx FilterBar.tsx StatBadge.tsx EmptyPanel.tsx
+        ├── components/balance/ # TopologyPanel.tsx FlowPackagePanel.tsx BalanceLedger.tsx BatchAuditDrawer.tsx
         ├── hooks/              # usePatrolGap.ts useIdbTable.ts
-        ├── pages/              # StationList.tsx PointConfig.tsx PatrolEntry.tsx AbnormalBoard.tsx LeakBoard.tsx PlanList.tsx
+        ├── pages/              # StationList.tsx PointConfig.tsx PatrolEntry.tsx AbnormalBoard.tsx LeakBoard.tsx BalanceBoard.tsx PlanList.tsx
         ├── router/index.tsx
-        ├── utils/              # range.ts db.ts export.ts
+        ├── utils/              # range.ts db.ts export.ts balanceEngine.ts
         ├── styles/main.css
         ├── App.tsx
         └── main.tsx
@@ -74,14 +75,22 @@ sologsb101-1009/
 | `/patrols` | 巡检录入 | Patrol、Reading、Point | 选定任务后逐点录入读数，实时偏差率与异常级别；逐点或整批保存；完成巡检、标记漏检、现场备注 |
 | `/abnormal` | 异常判定与分级 | Reading、Point | 按关键点权重降序排列；勾选批量确认；浓度类点位一键派发泄漏处置单 |
 | `/leaks` | 泄漏处置单与复检闭环 | Leak、Device、Reading | 派单 → 填写处置措施与处置人 → 录入复检浓度判合格闭环；导出处置台账 CSV |
+| `/balance` | 气量平衡台 | PipeSegment、FlowBatch、FlowSnapshot、SegmentBalance、Patrol、Leak | 维护站点上下游区段方向与损耗阈值；导入进出口流量快照（缺失记 null）；结合当天巡检与泄漏处置单核算区段损耗；查看超阈区段、待补依据、上一有效批次沿用与批次审计；确认归档与追加修订；导出核算台账 CSV |
 | `/plans` | 巡检计划与漏检提醒 | Patrol、Station | 按站点批量生成计划；超期未检自动提醒并按超期天数排序；导出读数台账 CSV 与结构版本 |
 
 ## 五、数据存储说明
 
 - **IndexedDB 库名**：`gbgaspress`（Dexie 封装，`src/utils/db.ts`）
-- **对象表**：`stations`、`devices`、`points`、`patrols`、`readings`、`leaks`
-- **数据结构版本**：`DB_VERSION = 2`，含 `version(1)` → `version(2)` 的索引变更与 `upgrade()` 迁移（补齐 `revision`、用所属设备回填点位与处置单的 `stationId` 冗余列、按标准区间重算历史读数 `deviationPct` / `isAbnormal`）
-- **首屏自动播种**：`initDatabase()` 中 `if (await db.stations.count() === 0) await seedDatabase()`，播种 2 座调压站 → 5 台设备 → 11 个点位 → 6 次巡检 → 11 条读数 → 3 张泄漏处置单的完整父子孙链条；播种幂等
+- **对象表**：`stations`、`devices`、`points`、`patrols`、`readings`、`leaks`、`pipeSegments`、`flowBatches`、`flowSnapshots`、`segmentBalances`
+- **数据结构版本**：`DB_VERSION = 3`，含 `version(1)` → `version(2)` → `version(3)` 的索引变更与 `upgrade()` 迁移：v2 补齐 `revision`、回填 `stationId` 冗余列、重算历史读数；v3 新增气量平衡四张表（站间有向区段、流量包批次/快照、区段日核算结果）
+- **气量平衡核算口径**（纯函数 `src/utils/balanceEngine.ts`）：
+  - 区段损耗 = 上游站出口流量 − 下游站进口流量，损耗率 = 损耗 / 上游出口 × 100，超过区段阈值标「超阈」
+  - 进出口读数缺失、上游出口为 0、或当天泄漏处置单未复检（待处置/已处置）时，状态置「待补依据」，**损耗保持 null 绝不写零**，并沿用上一有效批次（仅取「已核算」结果）
+  - 当天巡检（含漏检、异常读数）与泄漏处置单结论随核算结果快照留档
+  - 每行记录输入签名 `inputSignature`：拓扑 / 流量包 / 快照 / 站点 / 巡检 / 读数 / 泄漏变化后只重算签名变化的**未归档**日期；已确认批次对应日期冻结为归档快照，永不覆盖
+  - 流量包按 `batchNo` 幂等：重复导入同一批次只刷新未确认结果（审计链追加「刷新」）；确认后只能「追加修订」，数字不改写
+  - 流量包导入（写批次/快照 + 核算）在单个 Dexie 事务内完成，写入失败自动回滚到导入前状态
+- **首屏自动播种**：`initDatabase()` 中 `if (await db.stations.count() === 0) await seedDatabase()`，播种 2 座调压站 → 5 台设备 → 11 个点位 → 6 次巡检 → 11 条读数 → 3 张泄漏处置单 → 1 个站间区段 → 4 个流量包批次（含已确认归档、超阈、待补依据/沿用场景）的完整链条；播种幂等
 - **localStorage 辅助键**：`gbgaspress:db-version`、`gbgaspress:last-backup-at`、`gbgaspress:ui-prefs`
 - 应用为**无状态容器**：数据不落容器磁盘、不使用数据库服务、不挂载命名卷
 

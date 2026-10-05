@@ -7,6 +7,7 @@ import type { Point } from '@/types/point'
 import type { Patrol } from '@/types/patrol'
 import type { Reading } from '@/types/reading'
 import type { Leak } from '@/types/leak'
+import type { FlowBatch, PipeSegment, SegmentBalance } from '@/types/balance'
 import { abnormalLevelOf, deviationPctOf, formatLeakConcentration } from '@/utils/range'
 
 export function download(filename: string, content: string, mime: string): void {
@@ -151,6 +152,76 @@ export function exportPointCsv(stations: Station[], devices: Device[], points: P
   })
   const filename = `点位标准值-${stampSuffix()}.csv`
   download(filename, `\uFEFF${lines.join('\n')}`, 'text/csv;charset=utf-8')
+  return filename
+}
+
+/** 气量平衡核算台账 CSV：超阈区段、核算依据、待补原因与批次归档信息 */
+export function exportBalanceCsv(
+  segments: PipeSegment[],
+  batches: FlowBatch[],
+  balances: SegmentBalance[]
+): string {
+  const segmentOf = new Map(segments.map((segment) => [segment.id, segment]))
+  const batchOf = new Map(batches.map((batch) => [batch.id, batch]))
+  const header = [
+    '业务日期',
+    '区段',
+    '上游站',
+    '下游站',
+    '上游出口(m³/h)',
+    '下游进口(m³/h)',
+    '损耗(m³/h)',
+    '损耗率(%)',
+    '阈值(%)',
+    '超阈',
+    '核算状态',
+    '是否归档',
+    '待补依据',
+    '巡检依据',
+    '泄漏处置依据',
+    '沿用批次',
+    '批次号',
+    '确认人',
+    '修订说明'
+  ]
+  const lines: string[] = [header.map(csvCell).join(',')]
+  ;[...balances]
+    .sort((a, b) => b.bizDate.localeCompare(a.bizDate) || a.segmentName.localeCompare(b.segmentName, 'zh-Hans-CN'))
+    .forEach((balance) => {
+      const segment = segmentOf.get(balance.segmentId)
+      const batch = batchOf.get(balance.batchId)
+      lines.push(
+        [
+          balance.bizDate,
+          balance.segmentName,
+          balance.upstreamStationName,
+          balance.downstreamStationName,
+          balance.upstreamOutletM3h ?? '缺失',
+          balance.downstreamInletM3h ?? '缺失',
+          balance.lossM3h ?? '待补',
+          balance.lossRatePct ?? '—',
+          segment ? segment.lossRateThresholdPct : balance.thresholdPct,
+          balance.overThreshold ? '是' : '否',
+          balance.status,
+          balance.archived ? '已归档' : '未归档',
+          balance.pendingReasons.join('；') || '—',
+          balance.patrolEvidence
+            .map((patrol) => `${patrol.stationName} ${patrol.patrolman || '未署名'} ${patrol.state}${patrol.abnormalCount ? ` 异常${patrol.abnormalCount}处` : ''}`)
+            .join('；') || '—',
+          balance.leakEvidence
+            .map((leak) => `${leak.stationName} ${leak.concentrationPpm}ppm ${leak.state}${leak.retestValuePpm ? ` 复检${leak.retestValuePpm}ppm` : ''}`)
+            .join('；') || '—',
+          balance.carryFrom ? `${balance.carryFrom.batchNo}(${balance.carryFrom.bizDate})` : '—',
+          balance.batchNo,
+          batch?.confirmedBy || '—',
+          balance.revisionNotes.map((revision) => `${revision.note}[${revision.operator}]`).join('；') || '—'
+        ]
+          .map(csvCell)
+          .join(',')
+      )
+    })
+  const filename = `气量平衡核算台账-${stampSuffix()}.csv`
+  download(filename, `﻿${lines.join('\n')}`, 'text/csv;charset=utf-8')
   return filename
 }
 

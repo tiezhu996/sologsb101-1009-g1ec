@@ -12,6 +12,7 @@ const PointConfig = lazy(() => import('../pages/PointConfig'))
 const PatrolEntry = lazy(() => import('../pages/PatrolEntry'))
 const AbnormalBoard = lazy(() => import('../pages/AbnormalBoard'))
 const LeakBoard = lazy(() => import('../pages/LeakBoard'))
+const BalanceBoard = lazy(() => import('../pages/BalanceBoard'))
 const PlanList = lazy(() => import('../pages/PlanList'))
 
 export const ROUTES = {
@@ -20,6 +21,7 @@ export const ROUTES = {
   patrols: '/patrols',
   abnormal: '/abnormal',
   leaks: '/leaks',
+  balance: '/balance',
   plans: '/plans'
 } as const
 
@@ -42,6 +44,7 @@ export const appRoutes: RouteObject[] = [
       { path: 'patrols', element: withSuspense(<PatrolEntry />) },
       { path: 'abnormal', element: withSuspense(<AbnormalBoard />) },
       { path: 'leaks', element: withSuspense(<LeakBoard />) },
+      { path: 'balance', element: withSuspense(<BalanceBoard />) },
       { path: 'plans', element: withSuspense(<PlanList />) },
       { path: '*', element: <Navigate to={ROUTES.stations} replace /> }
     ]
